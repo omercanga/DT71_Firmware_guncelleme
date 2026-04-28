@@ -1,50 +1,109 @@
-# DT71 Mini Digital Tweezers — İstekler ve Araştırma Notları
+# DT71 Mini Digital Tweezers — Firmware Analizi ve Hedef Değerlendirmesi
 
-Bu doküman, DT71 için istenen davranışları tek bir “prompt” halinde toplar ve mevcut dosyalar/online kaynaklardan çıkabilen uygulanabilirlik notlarını özetler.
+> **Firmware:** APP V1.15 / DFU V3.55  
+> **Analiz kapsamı:** Kullanıcı kılavuzu V1.2, CAL.INI, APP115.bin (55 KB, STM32 Cortex-M, 0x08010000)
 
-## Prompt (kopyala‑yapıştır)
+---
 
-DT71 Mini Digital Tweezers için firmware/ayar geliştirmesi yapmak istiyorum.
+## Hedef 1: Auto Mod (Identify)
 
-Elimde DT71APP108/113/115 firmware (Intel HEX) ve cihaz USB disk olarak bağlanınca çıkan `CAL.INI` dosyası var.
+### Durum: Zaten mevcut — ek değişiklik gerekmez
 
-Hedefler:
-1) **Auto mod**: Uçlara dokundurulan parçanın türünü (voltaj mı, direnç mi, kapasitans mı) otomatik algılayıp uygun ölçümü başlatması.
-2) **Varsayılan açılış modu**: Cihaz açılınca önce Voltaj (V) modunda başlasın (veya Auto ile başlasın).
-3) **Kısa devre/süreklilik fonksiyonu**: 0Ω’a yakın ölçümlerde hızlı tepki ve sesli uyarı (beep) gibi bir “short/continuity” davranışı olsun; eşik değeri ayarlanabilir olsun.
+Firmware'de dört mod bulunuyor:
 
-Kısıtlar:
-- Kaynak kodum yok; sadece `.hex` ve `CAL.INI` gibi dosyalar var.
-- `CAL.INI` içinde `SLEEP_TIME`, `DISPLAY_DIRECTION`, `OLED_BRIGHTNESS`, waveform tabloları ve kalibrasyon katsayıları (örn. `CALRB_K0/K1`) bulunuyor.
+| İndeks | Mod adı    | Açıklama                        |
+|--------|------------|---------------------------------|
+| 0      | Measure    | Manuel ölçüm (**varsayılan açılış**) |
+| 1      | Identify   | Otomatik eleman tanıma (Auto)   |
+| 2      | Calibration| Kalibrasyon                     |
+| 3      | Signal Gen | Sinyal jeneratörü               |
 
-İstediğim çıktı:
-- Bu hedeflerin `CAL.INI` veya cihazın USB diskindeki başka bir param dosyasıyla yapılıp yapılamayacağı.
-- Eğer `CAL.INI` yetmiyorsa, firmware içinde hangi yapıların (NV/gear config, mode order, threshold) değişmesi gerektiği ve bunun pratikte nasıl yapılacağı (tersine mühendislik/patch vs.).
-- Riskler ve uygulanabilir en güvenli yaklaşım (ör. sadece param ile ayar / firmware patch / mümkün değilse alternatif).
+**Identify moduna geçiş:** Dokunmatik tuşa **uzun basış** → mod sırası Measure → Identify → Signal Gen → Calibration → tekrar başa döner.
 
-## Mevcut bulgular (eldeki dosyalardan)
+Identify modundayken:
+- Ekranın sol alt köşesinde **"A"** göstergesi belirir.
+- Otomatik olarak tanınan eleman türleri: **L (indüktans), C (kapasitans), R (direnç), D (diyot)**
+- Ekranda ana parametre + yardımcı parametre birlikte görünür (örn. `10uH  1Ω`)
 
-- Forumdan indirilen DT71 paketleri (DT71APP108/113/115) tipik olarak sadece `readme.txt + .hex` içeriyor.
-- Cihaz PC’ye bağlanınca görünen `CAL.INI` dosyası; uyku, ekran yönü, parlaklık, waveform/frekans seçenekleri ve kalibrasyon katsayıları gibi parametreler içeriyor.
-- `CAL.INI` içeriğinde “default açılış modu”, “auto mode decision thresholds” veya “continuity/short threshold” gibi açık anahtarlar **bulunmayabilir** (dosyanın sürümüne göre değişebilir).
+**Cihaz son modu NV'ye kaydeder:** APP113 sürüm notlarında "NV gear configuration" değişikliği yer alıyor. Bu, cihazın son kullanılan modu non-volatile bellekte sakladığı anlamına gelir. Identify moduna bir kez geçilip cihaz kapatılırsa, büyük olasılıkla bir sonraki açılışta Identify modunda başlar. **Bunu doğrulamak için test edin.**
 
-## İnternetten araştırma özeti (bulunabilen resmi/yarı-resmi kaynaklar)
+---
 
-Araştırmada öne çıkan nokta: `CAL.INI` üzerinden ayarlanabilen parametreler genellikle UI/konfor ve waveform seçenekleri ile sınırlı olarak anlatılıyor.
+## Hedef 2: Varsayılan Açılış Modu
 
-- `CAL.INI` ayarları (uyku/yön/parlaklık ve benzeri): `https://manuals.plus/miniware/miniware-dt71-mini-digital-tweezers-manual`
-- Bazı kaynaklarda “kısa devre kontrolü” için ayrı bir continuity modu yerine, **Rx (direnç)** modunda 0Ω’a yakın okumanın kısa devre olarak yorumlandığı belirtilir: `https://manuals.plus/miniware/miniware-dt71-mini-digital-tweezers-manual`
+### Durum: CAL.INI yoluyla değiştirilemez — firmware binary patch gerektirir
 
-## Pratik öneri (en düşük riskten yükseğe)
+**CAL.INI'nın desteklediği parametreler** (kılavuz s.13, kesin liste):
 
-1) **Sadece `CAL.INI` ile güvenli ayarlar**  
-   - Uyku süresi, ekran yönü, parlaklık, waveform gibi parametreler.
-   - Kalibrasyon katsayılarına (`CALRB_*`) dokunmak ölçüm doğruluğunu bozabilir; değişiklik yapılacaksa yedek alın.
+| Parametre          | Varsayılan | Açıklama                          | Aralık |
+|--------------------|-----------|-----------------------------------|--------|
+| `SLEEP_TIME`       | 60        | Uyku süresi (saniye)              | 30–999 |
+| `DISPLAY_DIRECTION`| 4         | 0=sağ el, 3=sol el, 4=otomatik   | 0/3/4  |
+| `OLED_BRIGHTNESS`  | 2         | Ekran parlaklığı                  | 0–10   |
+| `TSC_SEN`          | 1         | Dokunmatik hassasiyeti            | 0/1/2  |
+| `SINE_FREQ_OPT`    | 0         | Sinüs frekansı                    | 0–5    |
+| `NOISE_FREQ_OPT`   | 0         | Gürültü frekansı (yalnızca 100KHz)| 0      |
+| `USER_FREQ_OPT`    | 0         | Kullanıcı dalga frekansı          | 0–5    |
+| `PULSE_FREQ_OPT`   | 0         | Darbe frekansı                    | 0–8    |
+| `USER_WAVEFORM`    | sinüs     | 128 noktalı özel dalga tablosu    | 0x000–0xFFF |
+| `CALRB_K0/K1`      | —         | Kalibrasyon katsayıları           | —      |
 
-2) **USB disk üzerinde başka dosya var mı kontrolü (kritik)**  
-   - Diskte `CAL.INI` dışında `NV.INI`, `SYS.INI`, `PARAM.INI`, `CFG.INI` gibi dosyalar varsa; “default mode / threshold” gibi ayarlar orada olabilir.
+`DEFAULT_MODE`, `STARTUP_MODE` gibi bir parametre **yoktur** — ne CAL.INI'da ne de DFU bootloader'da (binary analizi ile doğrulandı).
 
-3) **Firmware ile değişiklik (kaynak kod yoksa riskli)**  
-   - “Açılışta voltaj/auto” ve “kısa devre/süreklilik için ayrı fonksiyon” çoğu cihazda firmware mantığı gerektirir.
-   - Kaynak kod olmadan: tersine mühendislik + binary patch gerekir; zaman/risk yüksektir.
+### Binary patch yolu (riskli, yedek alarak deneyin)
 
+Firmware binary analizi:
+- APP binary: STM32, 0x08010000 baz adresi
+- DFU bootloader: CAL.INI'yı parse eder, sonucu NV'ye yazar — DFU binary'si elimizde yok
+- APP binary'sindeki mod tablosu: `0x08015A34` (Measure / Identify / Calibration / Signal Gen)
+
+Eğer cihaz NV'ye son modu kaydedip geri okuyorsa (Hedef 1'de belirtilen test), binary patch'e gerek kalmaz. Eğer kaydedip okumuyorsa, Ghidra veya Radare2 ile APP binary'si tam disassemble edilmeli ve mode init adresindeki `0x00` baytı `0x01` yapılmalıdır. Bu işlem için:
+
+```bash
+# Ghidra açık kaynaklı, ücretsiz
+# Dosyayı Ghidra'ya yükle: DT71APP115.bin, ARM Cortex-M Little Endian
+# Base address: 0x08010000
+# Reset handler: 0x0801D698
+# 'Identify' string: 0x08015A44
+# Mode table: 0x08015A34
+```
+
+---
+
+## Hedef 3: Kısa Devre / Süreklilik (Continuity) + Beep
+
+### Durum: Donanım ve firmware desteklemiyor — mümkün değil
+
+**Firmware string analizi (55 KB binary taraması):**
+- `beep`, `buzz`, `tone`, `cont`, `short` → **hiçbir string yok**
+- Donanım şemasında buzzer/piezo bileşeni görünmüyor
+- DT71 bir LCR metre — multimetre değil; sesli devamlılık testi donanımsal olarak tasarlanmamış
+
+**Pratik alternatif:** Rx modunda 0Ω'a yakın okumaları kendiniz yorumlayın. Kısa devre eşiği donanıma bağlı, firmware konfigürasyon eşiği yok.
+
+---
+
+## CAL.INI Değişiklikleri (yapılan güncelleme)
+
+`TSC_SEN=1` parametresi eklendi (kılavuzda belgelenmiş ama orijinal CAL.INI'da eksikti). Bu parametre dokunmatik tuş hassasiyetini ayarlar.
+
+**Kalibrasyon katsayılarına (CALRB_K0/K1) kesinlikle dokunmayın** — değiştirirseniz ölçüm doğruluğu bozulur ve geri almak için yeniden kalibrasyon gerekir.
+
+---
+
+## Özet: Ne Yapılabilir, Ne Yapılamaz
+
+| Hedef | CAL.INI | Binary patch | Durum |
+|-------|---------|-------------|-------|
+| Auto/Identify modu | — | — | **Zaten var (uzun basış)** |
+| Açılışta Identify başlasın | Hayır | Evet (riskli) | Önce NV kalıcılığını test edin |
+| Kısa devre + beep | Hayır | Hayır | Donanım yok |
+
+---
+
+## Tuş Kullanımı (hızlı başvuru)
+
+- **Uzun basış**: Mod geçişi (Measure → Identify → Signal Gen → Calibration → …)
+- **Kısa basış**: Seçili mod içinde alt-menü/ölçüm tipi değiştirme
+
+Ölçüm alt-tipleri (Measure modunda kısa basış sırası): `Rx → Dx → Cx → Lx → Fx → Vx → Rx →…`
